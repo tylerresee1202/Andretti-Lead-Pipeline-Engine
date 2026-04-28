@@ -6,175 +6,186 @@ from dotenv import load_dotenv
 from O365 import Account
 from pyairtable import Api
 
-# --- 1. INITIALIZATION & CONFIG ---
+# --- 1. INITIALIZATION ---
 load_dotenv()
-
-# Airtable Setup
 airtable_api = Api(os.getenv('AIRTABLE_TOKEN'))
 table = airtable_api.table(os.getenv('AIRTABLE_BASE_ID'), os.getenv('AIRTABLE_TABLE_NAME'))
-
-# Microsoft Setup
 credentials = (os.getenv('CLIENT_ID'), os.getenv('CLIENT_SECRET'))
 account = Account(credentials, tenant_id='common')
 
-# --- 2. DATA EXTRACTION (The Slicer) ---
 def extract_field(pattern, text):
-    """Safely extracts data using Regex patterns."""
-    match = re.search(pattern, text)
-    return match.group(1).strip() if match else "Not Found"
+    """Advanced extractor using non-greedy matching and safety cleanups."""
+    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    if match:
+        data = match.group(1).strip()
+        # Clean up any residual labels if the email format is crushed
+        data = re.sub(r'(Last Name:|Phone:|Email:|Questions:|Comments:|Form Page Title:|Start Time:|Mailing Address:).*', '', data, flags=re.IGNORECASE | re.DOTALL).strip()
+        return data if data else None
+    return None
 
-def parse_lead(raw_text):
-    """Converts raw email body text into a structured data dictionary."""
-    first_name = extract_field(r"First Name:\s*(.*?)Last Name:", raw_text)
-    last_name = extract_field(r"Last Name:\s*(.*?)Mobile Phone:", raw_text)
-    phone = extract_field(r"Mobile Phone:\s*(.*?)Email:", raw_text)
-    email = extract_field(r"Email:\s*(.*?)Mailing Address", raw_text)
-    event_date = extract_field(r"Event Date:\s*(.*?)Start Time:", raw_text)
-    details = extract_field(r"Party/Event Details:\s*(.*?)Follow this link", raw_text)
+# --- 2. THE PARSING ENGINES (RESTORED) ---
+
+def parse_format_original(raw_text):
+    """Parses 'New Event Lead Notification' with ALL original fields restored."""
+    first = extract_field(r"First Name:\s*(.*?)(?=Last Name:|$)", raw_text)
+    last = extract_field(r"Last Name:\s*(.*?)(?=Mobile Phone:|$)", raw_text)
     
-    # Clean Headcount (Integer conversion)
-    raw_headcount = extract_field(r"Estimated Attendance:\s*(\d+)", raw_text)
-    headcount = int(raw_headcount) if raw_headcount != "Not Found" else 0
-    
-    # Clean Budget (Float conversion)
+    # RESTORED: Budget and Headcount Extraction
+    raw_hc = extract_field(r"Estimated Attendance:\s*(\d+)", raw_text)
     raw_budget = extract_field(r"Budget:\s*\$?([\d,]+\.?\d*)", raw_text)
-    budget = float(raw_budget.replace(',', '')) if raw_budget != "Not Found" else 0.0
-
+    
     return {
-        "Name": f"{first_name} {last_name}",
-        "Email": email,
-        "Phone": phone,
-        "Date": event_date,
-        "Headcount": headcount,
-        "Budget": budget,
-        "Details": details
+        "Name": f"{first or ''} {last or ''}".strip() or "Unknown",
+        "Phone": extract_field(r"Mobile Phone:\s*(.*?)(?=Email:|$)", raw_text) or "Not Found",
+        "Email": extract_field(r"Email:\s*(.*?)(?=Mailing Address:|$)", raw_text) or "Not Found",
+        "Date": extract_field(r"Event Date:\s*(.*?)(?=Start Time:|$)", raw_text),
+        "Headcount": int(raw_hc) if raw_hc else 0,
+        "Budget": float(raw_budget.replace(',', '')) if raw_budget else 0.0,
+        "Details": extract_field(r"Party/Event Details:\s*(.*?)(?=Follow this link|$)", raw_text) or "",
+        "Source": "Notification Form"
     }
 
-# --- 3. SCORING ENGINE (The Brain) ---
+def parse_format_nso(raw_text):
+    """Parses 'Durham NSO Contact Us' strictly for Name, Phone, Email, and Questions."""
+    first = extract_field(r"First Name:\s*(.*?)(?=Last Name:|$)", raw_text)
+    last = extract_field(r"Last Name:\s*(.*?)(?=Phone:|$)", raw_text)
+    
+    full_name = f"{first or ''} {last or ''}".strip()
+    if not first:
+        full_name = extract_field(r"Name:\s*(.*?)(?=Last Name:|Phone:|Email:|$)", raw_text)
+
+    phone = extract_field(r"Phone:\s*(.*?)(?=Email:|$)", raw_text)
+    email = extract_field(r"Email:\s*(.*?)(?=Questions:|Comments:|$)", raw_text)
+    questions = extract_field(r"(?:Questions|Comments):\s*(.*?)(?=Form Page Title:|$)", raw_text)
+
+    # Note: Budget/Date/Headcount are hardcoded as 0/None because this specific form doesn't need them.
+    return {
+        "Name": full_name or "Unknown",
+        "Phone": phone or "Not Found",
+        "Email": email or "Not Found",
+        "Date": None,
+        "Headcount": 0,
+        "Budget": 0.0,
+        "Details": questions or "",
+        "Source": "NSO Form"
+    }
+
+# --- 3. THE SCORING ENGINE ---
+
 def score_lead(lead_data):
-    """Calculates priority 1-10 based on qualifications, intent, and effort."""
     score = 0
     budget = lead_data.get("Budget", 0.0)
-    hc = lead_data.get("Headcount", 0)
-    details = str(lead_data.get("Details", "")).lower()
+    details = lead_data.get("Details", "").lower()
+    source = lead_data.get("Source", "Notification Form")
 
-    # A. Data Completeness (Contact Info)
+    # A. Contact Completeness
     if lead_data.get("Phone") != "Not Found": score += 1
     if lead_data.get("Email") != "Not Found": score += 1
 
-    # B. Effort & Keywords (Text Analysis)
-    if details and details != "not found":
-        # Effort-Based: Word Count
+    # B. Intent & Effort
+    if details:
         word_count = len(details.split())
-        if word_count > 15: score += 2
+        if word_count > 15: score += 3 
         elif word_count >= 5: score += 1
 
-        # Premium Upsell Keywords
-        premium = ["private room", "vip", "food package", "cake", "arcade cards", 
-                   "laser tag", "7d xperience", "bar package", "buffet", "drink tickets"]
-        for word in premium:
-            if word in details:
-                score += 2
+        premium = ["birthday", "party", "pricing", "grown up", "event", "package", "vip"]
+        if any(word in details for word in premium):
+            score += 2
+
+    # C. Date Math & Revenue Minimums (Restored for Original Form)
+    event_date_str = lead_data.get("Date")
+    if event_date_str:
+        event_dt = None
+        for fmt in ("%m/%d/%Y", "%A, %B %d, %Y"):
+            try:
+                event_dt = datetime.strptime(event_date_str, fmt)
                 break
+            except: continue
 
-        # Friction / Low-Spend Keywords
-        friction = ["bring our own", "outside food", "just racing", "no food", 
-                    "discount", "coupon", "waive", "cheap"]
-        for word in friction:
-            if word in details:
-                score -= 2
-                break
-
-    # C. Scheduling & Revenue Minimums
-    try:
-        event_date = datetime.strptime(lead_data["Date"], "%m/%d/%Y")
-        today = datetime.today()
-        days_until = (event_date - today).days
-        is_weekend = event_date.weekday() >= 4 # Fri, Sat, Sun
-
-        # Urgency Boost
-        if 0 <= days_until <= 14: score += 4
-        elif 15 <= days_until <= 30: score += 2 
+        if event_dt:
+            days_until = (event_dt - datetime.today()).days
+            is_weekend = event_dt.weekday() >= 4 
+            if 0 <= days_until <= 14: score += 4
+            elif 15 <= days_until <= 30: score += 2
             
-        # The Gatekeeper: Strict Booking Minimums
-        threshold = 400 if is_weekend else 350
-        if budget >= threshold:
-            score += 3
-        elif budget > 0:
-            score -= 5
-    except:
-        pass # Handle date errors silently
+            if budget > 0:
+                threshold = 400 if is_weekend else 350
+                if budget >= threshold: score += 3
+                else: score -= 5
 
-    # D. Quality Yield (Spend per Guest)
-    if hc > 0 and budget > 0:
-        if (budget / hc) >= 45: score += 2
+    # D. NSO "Direct Signal" Boost
+    if source == "NSO Form":
+        score += 3
 
-    # Clamp the result between 1 and 10
     return max(min(score, 10), 1)
 
-# --- 4. THE AUTOMATION LOOP (The Daemon) ---
+# --- 4. THE AUTOMATION LOOP (RESTORED) ---
+
 def run_pipeline():
     if not account.is_authenticated:
-        print("❌ Auth Error: You must run the token generation script first.")
-        return
+        print("❌ Auth Error: Generate your token first."); return
 
     mailbox = account.mailbox()
-    # Using string-based filter for better library compatibility
     unread_query = "isRead eq false"
     
-    print("\n🚀 Andretti Lead Engine Active.")
-    print("   Scanning every 30 minutes. Press Ctrl+C to stop.")
+    print("\n🚀 Andretti Lead Engine Active")
+    print("   Data pipelines fully restored for both form types.")
 
     while True:
-        current_time = datetime.now().strftime("%H:%M:%S")
-        print(f"[{current_time}] 🔍 Checking inbox...")
-
         try:
-            # THIS IS LINE 133 - Make sure it is indented!
             messages = mailbox.get_messages(limit=15, query=unread_query)
-            leads_processed = 0
+            processed_count = 0
 
             for msg in messages:
-                # Look for the specific notification subject
-                if "New Event Lead Notification" in msg.subject:
-                    email_uid = msg.object_id 
-                    
-                    # Deduplication: Check Airtable first
+                clean_data = None
+                subject = msg.subject
+                body = msg.get_body_text()
+                
+                if "New Event Lead Notification" in subject:
+                    print(f"  📩 Processing: Notification Lead")
+                    clean_data = parse_format_original(body)
+                elif "Durham NSO Contact Us" in subject:
+                    print(f"  📩 Processing: NSO Inquiry")
+                    clean_data = parse_format_nso(body)
+
+                if clean_data:
+                    email_uid = msg.object_id
                     if table.all(formula=f"{{Email_UID}}='{email_uid}'"):
-                        msg.mark_as_read()
-                        continue 
+                        msg.mark_as_read(); continue 
                     
-                    # Parse and Score
-                    clean_data = parse_lead(msg.get_body_text())
                     priority = score_lead(clean_data)
                     
-                    # Load to Airtable
-                    table.create({
+                    # BASE PAYLOAD: Always send these fields
+                    payload = {
                         "Name": clean_data["Name"],
-                        "Status": "Prospect",
-                        "Priority Score": priority,
-                        "Estimated Budget": clean_data["Budget"],
-                        "Headcount": clean_data["Headcount"],
-                        "Event Date": clean_data["Date"],
-                        "Email": clean_data["Email"],
                         "Phone": clean_data["Phone"],
+                        "Email": clean_data["Email"],
+                        "Priority Score": priority,
+                        "Status": "Prospect",
                         "Email_UID": email_uid 
-                    })
+                    }
                     
-                    print(f"   🎯 MATCH: {clean_data['Name']} | Score: {priority}/10")
-                    msg.mark_as_read()
-                    leads_processed += 1
+                    # RESTORED PAYLOAD: Only add Date/Budget/Headcount if they exist/belong to the format
+                    if clean_data["Date"]:
+                        payload["Event Date"] = clean_data["Date"]
+                        
+                    if clean_data["Source"] == "Notification Form":
+                        payload["Headcount"] = clean_data["Headcount"]
+                        payload["Estimated Budget"] = clean_data["Budget"]
 
-            if leads_processed == 0:
-                print("   💤 No new leads found.")
-            else:
-                print(f"   ✅ Successfully added {leads_processed} leads.")
+                    # Teleport to Airtable
+                    table.create(payload)
+                    
+                    print(f"    ✅ ADDED: {clean_data['Name']} (Score: {priority}/10)")
+                    msg.mark_as_read()
+                    processed_count += 1
+
+            if processed_count == 0:
+                print(f"   💤 [{datetime.now().strftime('%H:%M')}] No new leads.")
 
         except Exception as e:
-            # This 'except' block MUST exist if there is a 'try'
-            print(f"   ⚠️ Encountered an error: {e}")
+            print(f"  ⚠️ System Error: {e}")
 
-        # Sleep for 30 minutes (1800 seconds)
         time.sleep(1800)
 
 if __name__ == "__main__":
