@@ -163,7 +163,7 @@ def run_pipeline():
                         "Phone": clean_data["Phone"],
                         "Email": clean_data["Email"],
                         "Priority Score": priority,
-                        "Status": "Prospect",
+                        "Status": "New Inquiry",
                         "Inquiry Date": inquiry_date, # <--- NEW FIELD ADDED HERE
                         "Email_UID": email_uid 
                     }
