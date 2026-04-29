@@ -23,14 +23,14 @@ def extract_field(pattern, text):
         return data if data else None
     return None
 
-# --- 2. THE PARSING ENGINES (RESTORED) ---
+# --- 2. THE PARSING ENGINES ---
 
 def parse_format_original(raw_text):
     """Parses 'New Event Lead Notification' with ALL original fields restored."""
     first = extract_field(r"First Name:\s*(.*?)(?=Last Name:|$)", raw_text)
     last = extract_field(r"Last Name:\s*(.*?)(?=Mobile Phone:|$)", raw_text)
     
-    # RESTORED: Budget and Headcount Extraction
+    # Budget and Headcount Extraction
     raw_hc = extract_field(r"Estimated Attendance:\s*(\d+)", raw_text)
     raw_budget = extract_field(r"Budget:\s*\$?([\d,]+\.?\d*)", raw_text)
     
@@ -58,7 +58,6 @@ def parse_format_nso(raw_text):
     email = extract_field(r"Email:\s*(.*?)(?=Questions:|Comments:|$)", raw_text)
     questions = extract_field(r"(?:Questions|Comments):\s*(.*?)(?=Form Page Title:|$)", raw_text)
 
-    # Note: Budget/Date/Headcount are hardcoded as 0/None because this specific form doesn't need them.
     return {
         "Name": full_name or "Unknown",
         "Phone": phone or "Not Found",
@@ -92,7 +91,7 @@ def score_lead(lead_data):
         if any(word in details for word in premium):
             score += 2
 
-    # C. Date Math & Revenue Minimums (Restored for Original Form)
+    # C. Date Math & Revenue Minimums 
     event_date_str = lead_data.get("Date")
     if event_date_str:
         event_dt = None
@@ -119,7 +118,7 @@ def score_lead(lead_data):
 
     return max(min(score, 10), 1)
 
-# --- 4. THE AUTOMATION LOOP (RESTORED) ---
+# --- 4. THE AUTOMATION LOOP (High Capacity & Analytics Tracking) ---
 
 def run_pipeline():
     if not account.is_authenticated:
@@ -129,11 +128,11 @@ def run_pipeline():
     unread_query = "isRead eq false"
     
     print("\n🚀 Andretti Lead Engine Active")
-    print("   Data pipelines fully restored for both form types.")
+    print("   Processing New Leads. . .")
 
     while True:
         try:
-            messages = mailbox.get_messages(limit=15, query=unread_query)
+            messages = mailbox.get_messages(limit=50, query=unread_query)
             processed_count = 0
 
             for msg in messages:
@@ -155,6 +154,9 @@ def run_pipeline():
                     
                     priority = score_lead(clean_data)
                     
+                    # 🕒 NEW: Capture the exact date the email hit your inbox
+                    inquiry_date = msg.received.strftime("%Y-%m-%d")
+                    
                     # BASE PAYLOAD: Always send these fields
                     payload = {
                         "Name": clean_data["Name"],
@@ -162,10 +164,11 @@ def run_pipeline():
                         "Email": clean_data["Email"],
                         "Priority Score": priority,
                         "Status": "Prospect",
+                        "Inquiry Date": inquiry_date, # <--- NEW FIELD ADDED HERE
                         "Email_UID": email_uid 
                     }
                     
-                    # RESTORED PAYLOAD: Only add Date/Budget/Headcount if they exist/belong to the format
+                    # Add Date/Budget/Headcount if they exist/belong to the format
                     if clean_data["Date"]:
                         payload["Event Date"] = clean_data["Date"]
                         
@@ -179,6 +182,9 @@ def run_pipeline():
                     print(f"    ✅ ADDED: {clean_data['Name']} (Score: {priority}/10)")
                     msg.mark_as_read()
                     processed_count += 1
+                    
+                    # Safe API pacing (2 leads per second max)
+                    time.sleep(0.5)
 
             if processed_count == 0:
                 print(f"   💤 [{datetime.now().strftime('%H:%M')}] No new leads.")
