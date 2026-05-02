@@ -23,6 +23,13 @@ def extract_field(pattern, text):
         return data if data else None
     return None
 
+def isolate_email(text):
+    """Specifically hunts for a valid email address to bypass Outlook 'mailto:' artifacts."""
+    if not text: return "Not Found"
+    # This regex specifically looks for the standard text@text.com format
+    match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
+    return match.group(0) if match else "Not Found"
+
 # --- 2. THE PARSING ENGINES ---
 
 def parse_format_original(raw_text):
@@ -34,10 +41,13 @@ def parse_format_original(raw_text):
     raw_hc = extract_field(r"Estimated Attendance:\s*(\d+)", raw_text)
     raw_budget = extract_field(r"Budget:\s*\$?([\d,]+\.?\d*)", raw_text)
     
+    # Extract raw email block, then isolate the clean address
+    raw_email = extract_field(r"Email:\s*(.*?)(?=Mailing Address:|$)", raw_text)
+    
     return {
         "Name": f"{first or ''} {last or ''}".strip() or "Unknown",
         "Phone": extract_field(r"Mobile Phone:\s*(.*?)(?=Email:|$)", raw_text) or "Not Found",
-        "Email": extract_field(r"Email:\s*(.*?)(?=Mailing Address:|$)", raw_text) or "Not Found",
+        "Email": isolate_email(raw_email), # <--- EMAIL FIX APPLIED HERE
         "Date": extract_field(r"Event Date:\s*(.*?)(?=Start Time:|$)", raw_text),
         "Headcount": int(raw_hc) if raw_hc else 0,
         "Budget": float(raw_budget.replace(',', '')) if raw_budget else 0.0,
@@ -55,13 +65,13 @@ def parse_format_nso(raw_text):
         full_name = extract_field(r"Name:\s*(.*?)(?=Last Name:|Phone:|Email:|$)", raw_text)
 
     phone = extract_field(r"Phone:\s*(.*?)(?=Email:|$)", raw_text)
-    email = extract_field(r"Email:\s*(.*?)(?=Questions:|Comments:|$)", raw_text)
+    raw_email = extract_field(r"Email:\s*(.*?)(?=Questions:|Comments:|$)", raw_text)
     questions = extract_field(r"(?:Questions|Comments):\s*(.*?)(?=Form Page Title:|$)", raw_text)
 
     return {
         "Name": full_name or "Unknown",
         "Phone": phone or "Not Found",
-        "Email": email or "Not Found",
+        "Email": isolate_email(raw_email), # <--- EMAIL FIX APPLIED HERE
         "Date": None,
         "Headcount": 0,
         "Budget": 0.0,
@@ -154,7 +164,6 @@ def run_pipeline():
                     
                     priority = score_lead(clean_data)
                     
-                    # 🕒 NEW: Capture the exact date the email hit your inbox
                     inquiry_date = msg.received.strftime("%Y-%m-%d")
                     
                     # BASE PAYLOAD: Always send these fields
@@ -164,7 +173,7 @@ def run_pipeline():
                         "Email": clean_data["Email"],
                         "Priority Score": priority,
                         "Status": "New Inquiry",
-                        "Inquiry Date": inquiry_date, # <--- NEW FIELD ADDED HERE
+                        "Inquiry Date": inquiry_date, 
                         "Email_UID": email_uid 
                     }
                     
